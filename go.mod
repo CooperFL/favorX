@@ -2,6 +2,10 @@ module github.com/FavorLabs/favorX
 
 go 1.17
 
+replace (
+	github.com/elastic/gosigar v0.14.2 => github.com/CooperFL/gosigar v0.14.3
+)
+
 require (
 	github.com/FavorLabs/manifest v1.1.2
 	github.com/btcsuite/btcd v0.22.1
