@@ -73,7 +73,7 @@ func NewNode(o *Options) (*Node, error) {
 	return &Node{node: favorXNode, opts: config, logger: logger}, nil
 }
 
-func (n *Node) Listen(wait int) error {
+func (n *Node) Listen() error {
 	return n.node.HttpServe(
 		n.opts.APIAddr,
 		n.opts.DebugAPIAddr,
