@@ -23,7 +23,7 @@ import (
 
 type Node struct {
 	node   *node.Favor
-	opts   *Options
+	opts   node.Options
 	logger logging.Logger
 }
 
@@ -70,7 +70,25 @@ func NewNode(o *Options) (*Node, error) {
 		return nil, err
 	}
 
-	return &Node{node: favorXNode, opts: o, logger: logger}, nil
+	return &Node{node: favorXNode, opts: config, logger: logger}, nil
+}
+
+func (n *Node) Listen(wait int) error {
+	return n.node.HttpServe(
+		n.opts.APIAddr,
+		n.opts.DebugAPIAddr,
+		n.opts.EnableApiTLS,
+		n.opts.TlsCrtFile,
+		n.opts.TlsKeyFile,
+		n.logger,
+	)
+}
+
+func (n *Node) StopListen(wait int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(wait)*time.Second)
+	defer cancel()
+
+	return n.node.HttpShutdown(ctx)
 }
 
 func (n *Node) Stop() error {

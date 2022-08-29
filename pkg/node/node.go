@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/FavorLabs/favorX/pkg/accounting"
@@ -56,7 +57,11 @@ type Favor struct {
 	p2pCancel        context.CancelFunc
 	apiCloser        io.Closer
 	apiServer        *http.Server
+	apiClosed        int32
 	debugAPIServer   *http.Server
+	debugAPIClosed   int32
+	rpcServer        *Node // rpcNode
+	rpcClosed        int32
 	resolverCloser   io.Closer
 	errorLogWriter   *io.PipeWriter
 	tracerCloser     io.Closer
@@ -179,6 +184,10 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 			Handler:           debugAPIService,
 			ErrorLog:          log.New(b.errorLogWriter, "", 0),
 		}
+
+		debugAPIServer.RegisterOnShutdown(func() {
+			atomic.StoreInt32(&b.debugAPIClosed, 1)
+		})
 
 		go func() {
 			if o.EnableApiTLS {
@@ -434,6 +443,10 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 			ErrorLog:          log.New(b.errorLogWriter, "", 0),
 		}
 
+		apiServer.RegisterOnShutdown(func() {
+			atomic.StoreInt32(&b.apiClosed, 1)
+		})
+
 		go func() {
 			if o.EnableApiTLS {
 				logger.Infof("api address: https://%s", apiListener.Addr())
@@ -511,6 +524,7 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 	if err = stack.Start(); err != nil {
 		return nil, err
 	}
+	b.rpcServer = stack
 
 	if err = p2ps.Ready(); err != nil {
 		return nil, err
@@ -519,16 +533,93 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 	return b, nil
 }
 
-func (b *Favor) Shutdown(ctx context.Context) error {
-	errs := new(multiError)
+func (b *Favor) HttpServe(apiAddr, debugAPIAddr string, enableTLS bool, tlsCert, tlsKey string, logger logging.Logger) error {
+	var apiClosed, debugAPIClosed bool
 
-	if b.apiCloser != nil {
-		if err := b.apiCloser.Close(); err != nil {
-			errs.add(fmt.Errorf("api: %w", err))
+	apiClosed = atomic.LoadInt32(&b.apiClosed) == 1
+	if apiClosed && b.apiServer != nil {
+		apiListener, err := net.Listen("tcp", apiAddr)
+		if err != nil {
+			return err
 		}
+
+		apiServer := &http.Server{
+			IdleTimeout:       b.apiServer.IdleTimeout,
+			ReadHeaderTimeout: b.apiServer.ReadHeaderTimeout,
+			Handler:           b.apiServer.Handler,
+			ErrorLog:          b.apiServer.ErrorLog,
+		}
+
+		go func() {
+			atomic.StoreInt32(&b.apiClosed, 0)
+			if enableTLS {
+				logger.Infof("api address re-listening: https://%s", apiListener.Addr())
+				err = apiServer.ServeTLS(apiListener, tlsCert, tlsKey)
+				if err != nil {
+					logger.Debugf("api(https) serve: %v", err)
+					atomic.StoreInt32(&b.apiClosed, 1)
+				}
+			}
+			logger.Infof("api address re-listening: http://%s", apiListener.Addr())
+			err = apiServer.Serve(apiListener)
+			if err != nil {
+				logger.Debugf("api serve: %v", err)
+				atomic.StoreInt32(&b.apiClosed, 1)
+			}
+		}()
+
+		b.apiServer = apiServer
 	}
 
+	debugAPIClosed = atomic.LoadInt32(&b.debugAPIClosed) == 1
+	if debugAPIClosed && b.debugAPIServer != nil {
+		debugAPIListener, err := net.Listen("tcp", debugAPIAddr)
+		if err != nil {
+			return err
+		}
+
+		debugAPIServer := &http.Server{
+			IdleTimeout:       b.debugAPIServer.IdleTimeout,
+			ReadHeaderTimeout: b.debugAPIServer.ReadHeaderTimeout,
+			Handler:           b.debugAPIServer.Handler,
+			ErrorLog:          b.debugAPIServer.ErrorLog,
+		}
+
+		go func() {
+			atomic.StoreInt32(&b.debugAPIClosed, 0)
+			if enableTLS {
+				logger.Infof("debug api address re-listening: https://%s", debugAPIListener.Addr())
+				err = debugAPIServer.ServeTLS(debugAPIListener, tlsCert, tlsKey)
+				if err != nil {
+					logger.Debugf("debug api(https) serve: %v", err)
+					atomic.StoreInt32(&b.debugAPIClosed, 1)
+				}
+			}
+			logger.Infof("debug api address re-listening: http://%s", debugAPIListener.Addr())
+			err = debugAPIServer.Serve(debugAPIListener)
+			if err != nil {
+				logger.Debugf("debug api serve: %v", err)
+				atomic.StoreInt32(&b.debugAPIClosed, 1)
+			}
+		}()
+
+		b.debugAPIServer = debugAPIServer
+	}
+
+	rpcServerClosed := atomic.LoadInt32(&b.rpcClosed) == 1
+	if rpcServerClosed && b.rpcServer != nil {
+		if err := b.rpcServer.startRPC(); err != nil {
+			return err
+		}
+		atomic.StoreInt32(&b.rpcClosed, 0)
+	}
+
+	return nil
+}
+
+func (b *Favor) HttpShutdown(ctx context.Context) error {
 	var eg errgroup.Group
+
 	if b.apiServer != nil {
 		eg.Go(func() error {
 			if err := b.apiServer.Shutdown(ctx); err != nil {
@@ -545,9 +636,32 @@ func (b *Favor) Shutdown(ctx context.Context) error {
 			return nil
 		})
 	}
+	if b.rpcServer != nil {
+		eg.Go(func() error {
+			b.rpcServer.stopRPC()
+			atomic.StoreInt32(&b.rpcClosed, 1)
+			return nil
+		})
+	}
 
-	if err := eg.Wait(); err != nil {
+	return eg.Wait()
+}
+
+func (b *Favor) Shutdown(ctx context.Context) error {
+	errs := new(multiError)
+
+	if b.apiCloser != nil {
+		if err := b.apiCloser.Close(); err != nil {
+			errs.add(fmt.Errorf("api: %w", err))
+		}
+	}
+
+	if err := b.HttpShutdown(ctx); err != nil {
 		errs.add(err)
+	}
+
+	if err := b.rpcServer.Close(); err != nil {
+		errs.add(fmt.Errorf("rpc server: %w", err))
 	}
 
 	b.p2pCancel()
