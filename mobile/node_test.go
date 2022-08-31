@@ -1,6 +1,7 @@
 package mobile_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -66,6 +67,14 @@ func TestHttpServeAndClose(t *testing.T) {
 		t.Fatalf("new node: %v", err)
 	}
 
+	port, err := node.StartNetwork()
+	if !errors.Is(err, mobile.ErrNetworkReady) {
+		t.Fatalf("node not ready: %v", err)
+	}
+	if port == 0 {
+		t.Fatalf("get node port fail")
+	}
+
 	time.Sleep(3 * time.Second)
 	checkPort(t, opts.ApiPort, false)
 	checkPort(t, opts.DebugAPIPort, false)
@@ -81,7 +90,7 @@ func TestHttpServeAndClose(t *testing.T) {
 	checkPort(t, opts.DebugAPIPort, true)
 	checkPort(t, opts.WebsocketPort, true)
 
-	port, err := node.StartNetwork()
+	port, err = node.StartNetwork()
 	if err != nil {
 		t.Fatalf("recovering node listening port: %v", err)
 	}
@@ -96,6 +105,11 @@ func TestHttpServeAndClose(t *testing.T) {
 	checkPort(t, opts.ApiPort, false)
 	checkPort(t, opts.DebugAPIPort, false)
 	checkPort(t, opts.WebsocketPort, false)
+
+	_, err = node.StartNetwork()
+	if !errors.Is(err, mobile.ErrNetworkReady) {
+		t.Fatalf("node not ready: %v", err)
+	}
 
 	err = node.Stop()
 	if err != nil {

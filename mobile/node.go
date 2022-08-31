@@ -87,7 +87,8 @@ func (n *Node) StartNetwork() (int, error) {
 	defer n.netMux.Unlock()
 
 	if n.netEnabled {
-		return 0, ErrNetworkReady
+		apiPort := n.node.ListenOn("api")
+		return int(apiPort), ErrNetworkReady
 	}
 
 	n.netEnabled = true
@@ -105,7 +106,6 @@ func (n *Node) StartNetwork() (int, error) {
 	}
 
 	apiPort := n.node.ListenOn("api")
-
 	return int(apiPort), nil
 }
 
