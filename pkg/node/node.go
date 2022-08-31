@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -57,9 +58,9 @@ type Favor struct {
 	p2pCancel        context.CancelFunc
 	apiCloser        io.Closer
 	apiServer        *http.Server
-	apiClosed        int32
+	apiPort          int32
 	debugAPIServer   *http.Server
-	debugAPIClosed   int32
+	debugAPIPort     int32
 	rpcServer        *Node // rpcNode
 	rpcClosed        int32
 	resolverCloser   io.Closer
@@ -185,21 +186,26 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 			ErrorLog:          log.New(b.errorLogWriter, "", 0),
 		}
 
-		debugAPIServer.RegisterOnShutdown(func() {
-			atomic.StoreInt32(&b.debugAPIClosed, 1)
-		})
+		_, port, err := net.SplitHostPort(debugAPIListener.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		portNum, _ := strconv.ParseInt(port, 10, 32)
+		atomic.StoreInt32(&b.debugAPIPort, int32(portNum))
 
 		go func() {
-			if o.EnableApiTLS {
+			defer atomic.StoreInt32(&b.debugAPIPort, 0)
+
+			var err error
+			switch o.EnableApiTLS {
+			case true:
 				logger.Infof("debug api address: https://%s", debugAPIListener.Addr())
 				err = debugAPIServer.ServeTLS(debugAPIListener, o.TlsCrtFile, o.TlsKeyFile)
-				if err != nil {
-					logger.Errorf("debug api server enable https: %v", err)
-				}
+			case false:
+				logger.Infof("debug api address: http://%s", debugAPIListener.Addr())
+				err = debugAPIServer.Serve(debugAPIListener)
 			}
-			logger.Infof("debug api address: http://%s", debugAPIListener.Addr())
-			err = debugAPIServer.Serve(debugAPIListener)
-			if err != nil && err != http.ErrServerClosed {
+			if err != nil {
 				logger.Debugf("debug api server: %v", err)
 				logger.Error("unable to serve debug api")
 			}
@@ -443,21 +449,26 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 			ErrorLog:          log.New(b.errorLogWriter, "", 0),
 		}
 
-		apiServer.RegisterOnShutdown(func() {
-			atomic.StoreInt32(&b.apiClosed, 1)
-		})
+		_, port, err := net.SplitHostPort(apiListener.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		portNum, _ := strconv.ParseInt(port, 10, 32)
+		atomic.StoreInt32(&b.apiPort, int32(portNum))
 
 		go func() {
-			if o.EnableApiTLS {
+			defer atomic.StoreInt32(&b.apiPort, 0)
+
+			var err error
+			switch o.EnableApiTLS {
+			case true:
 				logger.Infof("api address: https://%s", apiListener.Addr())
 				err = apiServer.ServeTLS(apiListener, o.TlsCrtFile, o.TlsKeyFile)
-				if err != nil {
-					logger.Errorf("api server enable https: %v", err)
-				}
+			case false:
+				logger.Infof("api address: http://%s", apiListener.Addr())
+				err = apiServer.Serve(apiListener)
 			}
-			logger.Infof("api address: http://%s", apiListener.Addr())
-			err = apiServer.Serve(apiListener)
-			if err != nil && err != http.ErrServerClosed {
+			if err != nil {
 				logger.Debugf("api server: %v", err)
 				logger.Error("unable to serve api")
 			}
@@ -533,45 +544,21 @@ func NewNode(nodeMode aurora.Model, addr string, bosonAddress boson.Address, pub
 	return b, nil
 }
 
+func (b *Favor) ListenOn(typ string) int32 {
+	switch typ {
+	case "api":
+		return atomic.LoadInt32(&b.apiPort)
+	case "debugapi":
+		return atomic.LoadInt32(&b.debugAPIPort)
+	default:
+		return 0
+	}
+}
+
 func (b *Favor) HttpServe(apiAddr, debugAPIAddr string, enableTLS bool, tlsCert, tlsKey string, logger logging.Logger) error {
 	var apiClosed, debugAPIClosed bool
 
-	apiClosed = atomic.LoadInt32(&b.apiClosed) == 1
-	if apiClosed && b.apiServer != nil {
-		apiListener, err := net.Listen("tcp", apiAddr)
-		if err != nil {
-			return err
-		}
-
-		apiServer := &http.Server{
-			IdleTimeout:       b.apiServer.IdleTimeout,
-			ReadHeaderTimeout: b.apiServer.ReadHeaderTimeout,
-			Handler:           b.apiServer.Handler,
-			ErrorLog:          b.apiServer.ErrorLog,
-		}
-
-		go func() {
-			atomic.StoreInt32(&b.apiClosed, 0)
-			if enableTLS {
-				logger.Infof("api address re-listening: https://%s", apiListener.Addr())
-				err = apiServer.ServeTLS(apiListener, tlsCert, tlsKey)
-				if err != nil {
-					logger.Debugf("api(https) serve: %v", err)
-					atomic.StoreInt32(&b.apiClosed, 1)
-				}
-			}
-			logger.Infof("api address re-listening: http://%s", apiListener.Addr())
-			err = apiServer.Serve(apiListener)
-			if err != nil {
-				logger.Debugf("api serve: %v", err)
-				atomic.StoreInt32(&b.apiClosed, 1)
-			}
-		}()
-
-		b.apiServer = apiServer
-	}
-
-	debugAPIClosed = atomic.LoadInt32(&b.debugAPIClosed) == 1
+	debugAPIClosed = atomic.LoadInt32(&b.debugAPIPort) == 0
 	if debugAPIClosed && b.debugAPIServer != nil {
 		debugAPIListener, err := net.Listen("tcp", debugAPIAddr)
 		if err != nil {
@@ -585,25 +572,74 @@ func (b *Favor) HttpServe(apiAddr, debugAPIAddr string, enableTLS bool, tlsCert,
 			ErrorLog:          b.debugAPIServer.ErrorLog,
 		}
 
+		_, port, err := net.SplitHostPort(debugAPIListener.Addr().String())
+		if err != nil {
+			return err
+		}
+		portNum, _ := strconv.ParseInt(port, 10, 32)
+		atomic.StoreInt32(&b.debugAPIPort, int32(portNum))
+
 		go func() {
-			atomic.StoreInt32(&b.debugAPIClosed, 0)
-			if enableTLS {
-				logger.Infof("debug api address re-listening: https://%s", debugAPIListener.Addr())
+			defer atomic.StoreInt32(&b.debugAPIPort, 0)
+
+			var err error
+			switch enableTLS {
+			case true:
+				logger.Infof("debug api address: https://%s", debugAPIListener.Addr())
 				err = debugAPIServer.ServeTLS(debugAPIListener, tlsCert, tlsKey)
-				if err != nil {
-					logger.Debugf("debug api(https) serve: %v", err)
-					atomic.StoreInt32(&b.debugAPIClosed, 1)
-				}
+			case false:
+				logger.Infof("debug api address: http://%s", debugAPIListener.Addr())
+				err = debugAPIServer.Serve(debugAPIListener)
 			}
-			logger.Infof("debug api address re-listening: http://%s", debugAPIListener.Addr())
-			err = debugAPIServer.Serve(debugAPIListener)
 			if err != nil {
-				logger.Debugf("debug api serve: %v", err)
-				atomic.StoreInt32(&b.debugAPIClosed, 1)
+				logger.Debugf("debug api server: %v", err)
+				logger.Error("unable to serve debug api")
 			}
 		}()
 
 		b.debugAPIServer = debugAPIServer
+	}
+
+	apiClosed = atomic.LoadInt32(&b.apiPort) == 0
+	if apiClosed && b.apiServer != nil {
+		apiListener, err := net.Listen("tcp", apiAddr)
+		if err != nil {
+			return err
+		}
+
+		apiServer := &http.Server{
+			IdleTimeout:       b.apiServer.IdleTimeout,
+			ReadHeaderTimeout: b.apiServer.ReadHeaderTimeout,
+			Handler:           b.apiServer.Handler,
+			ErrorLog:          b.apiServer.ErrorLog,
+		}
+
+		_, port, err := net.SplitHostPort(apiListener.Addr().String())
+		if err != nil {
+			return err
+		}
+		portNum, _ := strconv.ParseInt(port, 10, 32)
+		atomic.StoreInt32(&b.apiPort, int32(portNum))
+
+		go func() {
+			defer atomic.StoreInt32(&b.apiPort, 0)
+
+			var err error
+			switch enableTLS {
+			case true:
+				logger.Infof("api address: https://%s", apiListener.Addr())
+				err = apiServer.ServeTLS(apiListener, tlsCert, tlsKey)
+			case false:
+				logger.Infof("api address: http://%s", apiListener.Addr())
+				err = apiServer.Serve(apiListener)
+			}
+			if err != nil {
+				logger.Debugf("api server: %v", err)
+				logger.Error("unable to serve api")
+			}
+		}()
+
+		b.apiServer = apiServer
 	}
 
 	rpcServerClosed := atomic.LoadInt32(&b.rpcClosed) == 1

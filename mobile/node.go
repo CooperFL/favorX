@@ -3,10 +3,12 @@ package mobile
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	fx "github.com/FavorLabs/favorX"
@@ -22,9 +24,11 @@ import (
 )
 
 type Node struct {
-	node   *node.Favor
-	opts   node.Options
-	logger logging.Logger
+	node       *node.Favor
+	opts       node.Options
+	logger     logging.Logger
+	netMux     sync.Mutex
+	netEnabled bool
 }
 
 type signerConfig struct {
@@ -65,16 +69,30 @@ func NewNode(o *Options) (*Node, error) {
 	config := o.export()
 	p2pAddr := fmt.Sprintf("%s:%d", listenAddress, o.P2PPort)
 
-	favorXNode, err := node.NewNode(mode, p2pAddr, signerConfig.address, *signerConfig.publicKey, signerConfig.signer, uint64(o.NetworkID), logger, signerConfig.libp2pPrivateKey, config)
+	n, err := node.NewNode(mode, p2pAddr, signerConfig.address, *signerConfig.publicKey, signerConfig.signer, uint64(o.NetworkID), logger, signerConfig.libp2pPrivateKey, config)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Node{node: favorXNode, opts: config, logger: logger}, nil
+	return &Node{node: n, netEnabled: true, opts: config, logger: logger}, nil
 }
 
-func (n *Node) Listen() error {
-	return n.node.HttpServe(
+var (
+	ErrNetworkReady  = errors.New("network ready")
+	ErrNetworkClosed = errors.New("network closed")
+)
+
+func (n *Node) StartNetwork() (int, error) {
+	n.netMux.Lock()
+	defer n.netMux.Unlock()
+
+	if n.netEnabled {
+		return 0, ErrNetworkReady
+	}
+
+	n.netEnabled = true
+
+	err := n.node.HttpServe(
 		n.opts.APIAddr,
 		n.opts.DebugAPIAddr,
 		n.opts.EnableApiTLS,
@@ -82,9 +100,25 @@ func (n *Node) Listen() error {
 		n.opts.TlsKeyFile,
 		n.logger,
 	)
+	if err != nil {
+		return 0, err
+	}
+
+	apiPort := n.node.ListenOn("api")
+
+	return int(apiPort), nil
 }
 
-func (n *Node) StopListen(wait int) error {
+func (n *Node) StopNetwork(wait int) error {
+	n.netMux.Lock()
+	defer n.netMux.Unlock()
+
+	if !n.netEnabled {
+		return ErrNetworkClosed
+	}
+
+	n.netEnabled = false
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(wait)*time.Second)
 	defer cancel()
 

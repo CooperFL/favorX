@@ -71,7 +71,7 @@ func TestHttpServeAndClose(t *testing.T) {
 	checkPort(t, opts.DebugAPIPort, false)
 	checkPort(t, opts.WebsocketPort, false)
 
-	err = node.StopListen(3)
+	err = node.StopNetwork(3)
 	if err != nil {
 		t.Fatalf("shutting down node listening port: %v", err)
 	}
@@ -81,10 +81,16 @@ func TestHttpServeAndClose(t *testing.T) {
 	checkPort(t, opts.DebugAPIPort, true)
 	checkPort(t, opts.WebsocketPort, true)
 
-	err = node.Listen(3)
+	port, err := node.StartNetwork()
 	if err != nil {
 		t.Fatalf("recovering node listening port: %v", err)
 	}
+
+	if port == 0 {
+		t.Fatalf("node http not started")
+	}
+
+	t.Logf("node listen on port %d", port)
 
 	time.Sleep(3 * time.Second)
 	checkPort(t, opts.ApiPort, false)
